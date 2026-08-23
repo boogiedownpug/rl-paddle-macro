@@ -1,0 +1,14 @@
+{
+  "monitor_index": 1,
+  "kickoff_key": "f9",
+  "aerial_key": "f10",
+  "cancel_key": "f8",
+  "trigger_mode": "toggle",
+  "controller_index": "auto",
+  "ball_min_confidence": 0.35,
+  "ball_stale_seconds": 1.0,
+  "aerial_yaw_gain": 3.0,
+  "aerial_steering_smoothing": 0.35,
+  "poll_hz": 250,
+  "debug": false
+}

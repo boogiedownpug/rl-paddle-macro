@@ -1,36 +1,8 @@
-"""
-Vision-assisted paddle "tag-in" controller for Rocket League.
+"""Vision-assisted virtual controller. Run elevated on Windows."""
 
-Combines everything so far:
-  - Mirrors your REAL physical controller onto a VIRTUAL one (ViGEmBus +
-    vgamepad) -- Rocket League only ever sees the virtual controller, and
-    this script never touches Rocket League's process or memory.
-  - PADDLE_KICKOFF: fixed, open-loop speed-flip kickoff sequence (same as
-    before -- doesn't need vision, kickoffs always start from the same spot).
-  - PADDLE_AERIAL: a fast-aerial macro that ALSO reads the ball's on-screen
-    position (via the Roboflow model, running in a background thread) and
-    steers left/right toward it while boosting up. This is the vision part.
-
-Nothing here reads Rocket League's memory or files -- ball position comes
-purely from a screenshot of your own screen, the same way you'd look at it
-yourself.
-
-Requirements:
-    pip install vgamepad XInput-Python keyboard opencv-python mss inference-sdk pillow numpy
-
-Setup:
-    1. ViGEmBus driver installed: https://github.com/ViGEm/ViGEmBus/releases
-    2. api_key.txt in this same folder with your Roboflow API key.
-    3. Run AS ADMINISTRATOR (the keyboard library needs it).
-    4. Rocket League set to use the virtual "Xbox 360 Controller".
-    5. Rocket League in Windowed or Borderless Windowed mode, NOT Fullscreen.
-
-This is a working first draft, not a finished tuned product -- the yaw
-correction gain, trigger keys, and macro timings will likely need a real
-tuning pass once you can see it react live.
-"""
-
+import json
 import os
+from pathlib import Path
 import threading
 import time
 
@@ -41,162 +13,156 @@ import numpy as np
 import vgamepad as vg
 import XInput
 
-MODEL_ID = "rocket-league-uidod/12"
-DETECTION_FRAME_SIZE = (640, 360)
-BALL_STALE_SECONDS = 1.0
-AERIAL_YAW_GAIN = 3.0
-PADDLE_KICKOFF_KEY = "f9"
-PADDLE_AERIAL_KEY = "f10"
-CONTROLLER_INDEX = 0
-POLL_HZ = 250
+from macro_core import MacroEngine, NEUTRAL
 
-with open("api_key.txt") as f:
-    API_KEY = f.read().strip()
-
-# The local inference package reads this environment variable to download
-# model weights the first time -- after that first download it's cached
-# locally and runs with no network calls at all.
-os.environ["ROBOFLOW_API_KEY"] = API_KEY
-
-from inference import get_model  # noqa: E402  (import after setting env var)
-
-print("Loading model locally (first run downloads weights, may take a minute)...")
-MODEL = get_model(model_id=MODEL_ID)
-print("Model loaded.")
-
-# ---------------------------------------------------------------------------
-# Shared ball state (written by the detection thread, read by the control loop)
-# ---------------------------------------------------------------------------
-
-ball_state_lock = threading.Lock()
-ball_state = {"x_frac": 0.5, "y_frac": 0.5, "size_frac": 0.0, "timestamp": 0.0}
+ROOT = Path(__file__).resolve().parent
+DEFAULTS = {
+    "model_id": "rocket-league-uidod/12", "monitor_index": 1,
+    "detection_frame_size": [640, 360], "ball_stale_seconds": 1.0,
+    "ball_min_confidence": 0.35, "aerial_yaw_gain": 3.0,
+    "aerial_steering_smoothing": 0.35, "kickoff_key": "f9",
+    "aerial_key": "f10", "cancel_key": "f8", "trigger_mode": "toggle",
+    "controller_index": "auto", "poll_hz": 250, "debug": False,
+}
 
 
-def detection_loop():
-    w, h = DETECTION_FRAME_SIZE
-    with mss.mss() as sct:
-        monitor = sct.monitors[1]
+def load_config():
+    result = dict(DEFAULTS)
+    path = ROOT / "config.json"
+    if path.exists():
+        with path.open(encoding="utf-8") as handle:
+            result.update(json.load(handle))
+    if os.environ.get("RL_MACRO_DEBUG") == "1":
+        result["debug"] = True
+    return result
+
+
+CONFIG = load_config()
+ball_lock = threading.Lock()
+ball_state = {"x_frac": 0.5, "confidence": 0.0, "timestamp": 0.0}
+smoothed_yaw = 0.0
+
+
+def load_model():
+    key_path = ROOT / "api_key.txt"
+    if not key_path.exists():
+        raise SystemExit("Missing api_key.txt. See README.md for setup.")
+    os.environ["ROBOFLOW_API_KEY"] = key_path.read_text(encoding="utf-8").strip()
+    from inference import get_model
+    print("Loading local vision model (first run may download weights)...")
+    return get_model(model_id=CONFIG["model_id"])
+
+
+def detection_loop(model):
+    width, height = CONFIG["detection_frame_size"]
+    with mss.mss() as capture:
+        index = int(CONFIG["monitor_index"])
+        if index <= 0 or index >= len(capture.monitors):
+            print(f"Monitor {index} unavailable; using primary monitor 1.")
+            index = 1
         while True:
-            raw = np.array(sct.grab(monitor))
-            frame = cv2.cvtColor(raw, cv2.COLOR_BGRA2BGR)
-            small = cv2.resize(frame, (w, h))
-
+            frame = np.array(capture.grab(capture.monitors[index]))
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+            frame = cv2.resize(frame, (width, height))
             try:
-                result = MODEL.infer(small)[0]
-                predictions = result.predictions
-            except Exception as e:
-                print("Detection failed:", e)
-                predictions = []
-
-            ball_preds = [p for p in predictions if p.class_name == "ball"]
-            if ball_preds:
-                best = max(ball_preds, key=lambda p: p.confidence)
-                with ball_state_lock:
-                    ball_state["x_frac"] = best.x / w
-                    ball_state["y_frac"] = best.y / h
-                    ball_state["size_frac"] = max(best.width, best.height) / h
-                    ball_state["timestamp"] = time.time()
-
-
-def get_ball_state():
-    with ball_state_lock:
-        return dict(ball_state)
+                predictions = model.infer(frame)[0].predictions
+            except Exception as error:
+                print(f"Detection failed: {error}")
+                time.sleep(0.1)
+                continue
+            balls = [p for p in predictions if p.class_name == "ball"
+                     and p.confidence >= float(CONFIG["ball_min_confidence"])]
+            if balls:
+                best = max(balls, key=lambda p: p.confidence)
+                with ball_lock:
+                    ball_state.update(x_frac=best.x / width,
+                                      confidence=best.confidence,
+                                      timestamp=time.monotonic())
 
 
-# ---------------------------------------------------------------------------
-# Macro definitions
-# ---------------------------------------------------------------------------
-
-NEUTRAL = dict(
-    throttle=0, steer=0, pitch=0, yaw=0, roll=0,
-    jump=False, boost=False, handbrake=False,
-)
-
-
-def hold(ticks, **kwargs):
-    controls = dict(NEUTRAL)
-    controls.update(kwargs)
-    return (ticks, controls)
-
-
-SPEED_FLIP_KICKOFF = [
-    hold(55, throttle=1, boost=True),
-    hold(20, throttle=1, boost=True, steer=-1),
-    hold(10, throttle=1, jump=True, boost=True),
-    hold(5,  throttle=1, boost=True),
-    hold(5,  throttle=1, yaw=0.8, pitch=-0.7, jump=True, boost=True),
-    hold(65, throttle=1, pitch=1, boost=True),
-    hold(50, throttle=1, roll=1, pitch=0.5),
-]
-
-
-def aerial_macro_tick(tick_index):
-    """Returns a controls dict for the vision-assisted aerial macro at the
-    given tick index (0-based), or None once the macro should stop."""
-    state = get_ball_state()
-    age = time.time() - state["timestamp"]
-
-    if age > BALL_STALE_SECONDS:
-        return None  # lost sight of the ball -- bail out to passthrough
-
-    yaw = max(-1.0, min(1.0, (state["x_frac"] - 0.5) * AERIAL_YAW_GAIN))
-
-    if tick_index == 0:
+def aerial_controls(elapsed):
+    global smoothed_yaw
+    with ball_lock:
+        state = dict(ball_state)
+    if time.monotonic() - state["timestamp"] > float(CONFIG["ball_stale_seconds"]):
+        return None
+    target = max(-1.0, min(1.0, (state["x_frac"] - 0.5) * CONFIG["aerial_yaw_gain"]))
+    smoothing = float(CONFIG["aerial_steering_smoothing"])
+    smoothed_yaw += (target - smoothed_yaw) * smoothing
+    if elapsed < 0.024:
         return dict(NEUTRAL, jump=True)
-    if tick_index <= 5:
+    if elapsed < 0.044:
         return dict(NEUTRAL)
-    if tick_index == 6:
+    if elapsed < 0.068:
         return dict(NEUTRAL, jump=True)
-    if tick_index < 130:
-        return dict(NEUTRAL, pitch=1, boost=True, yaw=yaw)
-    return None  # macro finished naturally
+    if elapsed < 0.520:
+        return dict(NEUTRAL, pitch=1, boost=True, yaw=smoothed_yaw)
+    return None
 
 
-# ---------------------------------------------------------------------------
-# Virtual controller output
-# ---------------------------------------------------------------------------
+def choose_controller_index():
+    connected = [i for i, value in enumerate(XInput.get_connected()) if value]
+    configured = CONFIG["controller_index"]
+    if configured != "auto":
+        index = int(configured)
+        if index not in connected:
+            raise SystemExit(f"Configured slot {index} is not connected; found {connected}.")
+        return index
+    if not connected:
+        raise SystemExit("No XInput controller was found.")
+    # ViGEm normally gets the lowest slot because it was created first. The
+    # physical controller is therefore the highest connected slot.
+    index = connected[-1]
+    if len(connected) == 1:
+        print("Warning: only one slot is visible; verify it is the physical controller.")
+    print(f"Connected XInput slots: {connected}; reading slot {index}.")
+    return index
 
-gamepad = vg.VX360Gamepad()
+
+def wait_for_controller(gamepad, previous_index):
+    """Fail neutral and wait for a disconnected physical pad to return."""
+    apply_controls(gamepad, NEUTRAL)
+    print(f"Physical controller slot {previous_index} disconnected; output neutralized.")
+    while True:
+        connected = [i for i, value in enumerate(XInput.get_connected()) if value]
+        configured = CONFIG["controller_index"]
+        if configured != "auto" and int(configured) in connected:
+            print(f"Physical controller restored on configured slot {configured}.")
+            return int(configured)
+        # In auto mode, do not select the lone ViGEm device and mirror our own
+        # output back into itself. Wait until a second controller appears.
+        if configured == "auto" and len(connected) >= 2:
+            index = connected[-1]
+            print(f"Physical controller restored; now reading slot {index}.")
+            return index
+        time.sleep(0.25)
 
 
-def axis_to_int16(v):
-    v = max(-1.0, min(1.0, v))
-    return int(v * 32767)
+def axis(value):
+    return int(max(-1.0, min(1.0, value)) * 32767)
 
 
-def trigger_to_byte(v):
-    v = max(0.0, min(1.0, v))
-    return int(v * 255)
+def set_button(gamepad, pressed, button):
+    (gamepad.press_button if pressed else gamepad.release_button)(button)
 
 
-def apply_macro_controls(controls):
-    gamepad.left_joystick(x_value=axis_to_int16(controls["steer"]), y_value=0)
-    gamepad.right_joystick(
-        x_value=axis_to_int16(controls["yaw"]),
-        y_value=axis_to_int16(-controls["pitch"]),
-    )
+def apply_controls(gamepad, output):
+    # This player's air pitch/yaw are on left stick; right stick is camera.
+    x_value = output["steer"] or output["yaw"]
+    gamepad.left_joystick(x_value=axis(x_value), y_value=axis(-output["pitch"]))
+    gamepad.right_joystick(x_value=0, y_value=0)
     gamepad.left_trigger(0)
-    gamepad.right_trigger(trigger_to_byte(1 if controls["throttle"] > 0 else 0))
-
-    if controls["jump"]:
-        gamepad.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
-    else:
-        gamepad.release_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
-
-    if controls["boost"]:
-        gamepad.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_B)
-    else:
-        gamepad.release_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_B)
-
-    if controls["handbrake"]:
-        gamepad.press_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_X)
-    else:
-        gamepad.release_button(vg.XUSB_BUTTON.XUSB_GAMEPAD_X)
-
+    gamepad.right_trigger(255 if output["throttle"] > 0 else 0)
+    set_button(gamepad, output["jump"], vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
+    set_button(gamepad, output["boost"], vg.XUSB_BUTTON.XUSB_GAMEPAD_B)
+    set_button(gamepad, output["roll"] < 0 or output["handbrake"],
+               vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_SHOULDER)
+    set_button(gamepad, output["roll"] > 0,
+               vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_SHOULDER)
     gamepad.update()
 
 
-def mirror_physical_state(state):
+def mirror(gamepad, state):
     gamepad.left_joystick(x_value=state.Gamepad.sThumbLX, y_value=state.Gamepad.sThumbLY)
     gamepad.right_joystick(x_value=state.Gamepad.sThumbRX, y_value=state.Gamepad.sThumbRY)
     gamepad.left_trigger(state.Gamepad.bLeftTrigger)
@@ -205,74 +171,45 @@ def mirror_physical_state(state):
     gamepad.update()
 
 
-# ---------------------------------------------------------------------------
-# Main control loop
-# ---------------------------------------------------------------------------
-
-def run():
-    tick_interval = 1.0 / POLL_HZ
-
-    mode = "idle"  # "idle" | "kickoff" | "aerial"
-    kickoff_step_index = 0
-    kickoff_step_ticks_left = 0
-    aerial_tick_index = 0
-
-    kickoff_was_held = False
-    aerial_was_held = False
-
-    print("Vision paddle controller running. Ctrl+C to stop.")
-    print(f"Kickoff key: {PADDLE_KICKOFF_KEY!r}  |  Aerial key: {PADDLE_AERIAL_KEY!r}")
-
-    while True:
-        loop_start = time.perf_counter()
-
-        kickoff_held = keyboard.is_pressed(PADDLE_KICKOFF_KEY)
-        aerial_held = keyboard.is_pressed(PADDLE_AERIAL_KEY)
-
-        if kickoff_held and not kickoff_was_held:
-            mode = "kickoff"
-            kickoff_step_index = 0
-            kickoff_step_ticks_left = SPEED_FLIP_KICKOFF[0][0]
-        elif aerial_held and not aerial_was_held:
-            mode = "aerial"
-            aerial_tick_index = 0
-
-        if mode == "kickoff" and not kickoff_held:
-            mode = "idle"
-        if mode == "aerial" and not aerial_held:
-            mode = "idle"
-
-        if mode == "kickoff":
-            _, controls = SPEED_FLIP_KICKOFF[kickoff_step_index]
-            apply_macro_controls(controls)
-            kickoff_step_ticks_left -= 1
-            if kickoff_step_ticks_left <= 0:
-                kickoff_step_index += 1
-                if kickoff_step_index >= len(SPEED_FLIP_KICKOFF):
-                    mode = "idle"
-                else:
-                    kickoff_step_ticks_left = SPEED_FLIP_KICKOFF[kickoff_step_index][0]
-
-        elif mode == "aerial":
-            controls = aerial_macro_tick(aerial_tick_index)
-            if controls is None:
-                mode = "idle"
+def run_application():
+    model = load_model()
+    gamepad = vg.VX360Gamepad()
+    controller_index = choose_controller_index()
+    threading.Thread(target=detection_loop, args=(model,), daemon=True).start()
+    engine = MacroEngine(aerial_controls, trigger_mode=CONFIG["trigger_mode"])
+    interval = 1.0 / float(CONFIG["poll_hz"])
+    old_mode, last_debug = engine.mode, 0.0
+    print(f"Running: kickoff={CONFIG['kickoff_key']}, aerial={CONFIG['aerial_key']}, "
+          f"cancel={CONFIG['cancel_key']}, mode={CONFIG['trigger_mode']}")
+    print("Ctrl+C stops. A second trigger tap or the cancel key returns control.")
+    try:
+        while True:
+            started = time.perf_counter()
+            if keyboard.is_pressed(CONFIG["cancel_key"]):
+                engine.cancel()
+            output = engine.update(time.monotonic(),
+                                   keyboard.is_pressed(CONFIG["kickoff_key"]),
+                                   keyboard.is_pressed(CONFIG["aerial_key"]))
+            if output is None:
+                try:
+                    state = XInput.get_state(controller_index)
+                except Exception:
+                    controller_index = wait_for_controller(gamepad, controller_index)
+                    continue
+                mirror(gamepad, state)
+                if CONFIG["debug"] and time.monotonic() - last_debug > 0.5:
+                    print(f"[slot {controller_index}] LX={state.Gamepad.sThumbLX} "
+                          f"LY={state.Gamepad.sThumbLY} RT={state.Gamepad.bRightTrigger}")
+                    last_debug = time.monotonic()
             else:
-                apply_macro_controls(controls)
-                aerial_tick_index += 1
-
-        else:  # idle -- full passthrough
-            state = XInput.get_state(CONTROLLER_INDEX)
-            mirror_physical_state(state)
-
-        kickoff_was_held = kickoff_held
-        aerial_was_held = aerial_held
-
-        elapsed = time.perf_counter() - loop_start
-        time.sleep(max(0.0, tick_interval - elapsed))
+                apply_controls(gamepad, output)
+            if engine.mode != old_mode:
+                print(f"[mode change] {old_mode} -> {engine.mode}")
+                old_mode = engine.mode
+            time.sleep(max(0.0, interval - (time.perf_counter() - started)))
+    finally:
+        apply_controls(gamepad, NEUTRAL)
 
 
 if __name__ == "__main__":
-    detection_thread = threading.Thread(target=detection_loop, daemon=True)
-    detection_thread.start()
-    run()
+    run_application()

@@ -1,0 +1,7 @@
+inference-cpu
+keyboard
+mss
+numpy
+opencv-python
+vgamepad
+XInput-Python

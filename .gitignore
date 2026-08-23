@@ -1,5 +1,6 @@
 # Never commit your API key
 api_key.txt
+config.json
 
 # Virtual environment (huge, machine-specific, everyone should make their own)
 venv/

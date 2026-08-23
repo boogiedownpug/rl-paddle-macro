@@ -39,33 +39,28 @@ CV model (`inference` / Roboflow's `rocket-league-uidod` model, running
 position state -> read by the aerial macro for basic left/right steering
 correction.
 
-## Current status (as of last session)
+## Current status
 
 **Working:**
 - Full local (no internet) ball detection via CPU inference — confirmed
   drawing correct boxes around the ball.
 - Virtual controller creation and **passthrough** (driving normally through
   the script) — confirmed working with real controller input.
-- The controller-slot bug is understood and fixed: when the script's virtual
-  controller and your real controller are both connected, Windows may assign
-  the virtual one to XInput slot 0 and bump your real controller to slot 1.
-  `CONTROLLER_INDEX` in the script is currently set to `1` to account for
-  this. **If passthrough ever stops working after future changes, check this
-  first** — run the debug script and look at the `Controller diagnostic`
-  printout at startup.
+- Controller slots are discovered at startup. In `auto` mode the program uses
+  the highest connected slot (normally the physical controller after ViGEm
+  takes slot 0). Set `controller_index` explicitly in `config.json` if that
+  heuristic is wrong for your setup.
 - Control mapping has been corrected to match this player's actual custom
   Rocket League bindings (see below) — Rocket League reads pitch/yaw off the
   **left** stick (not right — right stick is camera), and this player has
   discrete air-roll buttons (LB = roll left, RB = roll right), not the more
   common hold-modifier style.
 
-**Not working / where we left off:**
-- Pressing F9 (the kickoff macro trigger) is currently doing nothing. Last
-  action taken: added a `[mode change]` debug print to confirm whether the
-  keypress is even being detected by the `keyboard` library before assuming
-  it's a macro-logic bug. **This is the very next thing to debug.** Terminal
-  was running as Administrator (required for the `keyboard` library to work),
-  so that's not the cause.
+**Needs physical/in-game validation:**
+- F9 now defaults to toggle mode: press once to run the entire kickoff. Press
+  it again, press F8, or take over after completion to return to passthrough.
+  Set `trigger_mode` to `hold` if release-to-cancel is preferred.
+- The speed-flip and aerial timings still need a Free Play tuning pass.
 - We explored using **HidHide** (a driver to hide the real controller from
   everything except our whitelisted script) to solve an earlier double-input/
   splitscreen issue. It's installed and correctly configured (verified via
@@ -99,31 +94,34 @@ the script needs matching updates.
 
 1. Python 3.11 specifically (not newer — dependency compatibility issues with
    3.14). Installed via `py install 3.11`, venv created with `py -3.11 -m venv venv`.
-2. `pip install opencv-python mss inference-sdk pillow numpy` (vision testing)
-3. `pip install inference-cpu` (local inference — **use the CPU package, not
+2. `python -m pip install -r requirements.txt`
+3. The requirements use `inference-cpu` (local inference — **do not replace it
    `inference-gpu`**; the GPU package pulls in a huge unrelated dependency
    tree including `pycuda`, which requires the full NVIDIA CUDA Toolkit to
    compile and isn't worth it for this one small model)
-4. `pip install vgamepad XInput-Python keyboard` (controller/macro layer —
-   if `pip` itself gets blocked by "Device Guard policy," use
-   `python -m pip install ...` instead)
-5. Install the [ViGEmBus driver](https://github.com/ViGEm/ViGEmBus/releases)
+4. Install the [ViGEmBus driver](https://github.com/ViGEm/ViGEmBus/releases)
    (required, separate from pip packages)
-6. A free [Roboflow](https://roboflow.com) account for the API key (only
+5. A free [Roboflow](https://roboflow.com) account for the API key (only
    needed once, to download the model weights on first run — after that it's
    fully local and free forever)
-7. Put your Roboflow API key in `api_key.txt` in this folder (**never commit
+6. Put your Roboflow API key in `api_key.txt` in this folder (**never commit
    this file** — it's in `.gitignore`)
+7. Optionally copy `config.example.json` to `config.json` and customize it.
 8. Rocket League set to **Windowed** or **Borderless Windowed** mode (not
    Fullscreen), and set to use the virtual "Xbox 360 Controller" once the
    script is running
 
+Xbox Elite paddles are not exposed as distinct buttons by XInput. Configure a
+paddle to emit F9/F10 (or another key chosen in `config.json`) using the
+controller's supported remapping software.
+
 ## Files
 
-- `vision_paddle_controller_local_debug.py` — the main script, current
-  working version, with extra diagnostic printouts (controller slot info,
-  live stick readings, mode-change logging). Use this one, not the older
-  non-debug or network-API versions.
+- `vision_paddle_controller_local.py` — main local-inference controller.
+- `vision_paddle_controller_local_debug.py` — the same controller with live
+  passthrough diagnostics enabled.
+- `macro_core.py` — dependency-free, elapsed-time macro state machine.
+- `config.example.json` — documented runtime defaults; copy to `config.json`.
 - `detect_test.py` — earlier standalone detection-only test (draws boxes on
   a live preview window), kept for reference/re-testing detection in
   isolation if needed.
@@ -131,13 +129,12 @@ the script needs matching updates.
 
 ## Next steps
 
-1. Debug why F9 isn't triggering the macro (check `[mode change]` output)
+1. Confirm the F9 kickoff trigger and automatic controller slot in Free Play.
 2. Once the kickoff macro is confirmed working end-to-end, do a real
    in-game test of the vision-assisted aerial macro (F10) with the ball
    actually in the air and in view
-3. Tune the aerial macro's steering gain (`AERIAL_YAW_GAIN`) and the
-   feasibility thresholds (`AERIAL_MIN_BALL_HEIGHT`, `AERIAL_MAX_DIST`,
-   `AERIAL_MIN_BOOST`) based on how it actually looks in play
+3. Tune `aerial_yaw_gain`, steering smoothing, and macro timings based on how
+   it actually looks in play.
 4. Longer-term: more macros (wave dash, other kickoff variants), and
    eventually attempting an air-dribble/flip-reset macro (acknowledged
    up front as the hardest tier, may never be fully reliable)
