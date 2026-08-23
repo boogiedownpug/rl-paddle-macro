@@ -1,0 +1,13 @@
+# Never commit your API key
+api_key.txt
+
+# Virtual environment (huge, machine-specific, everyone should make their own)
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Downloaded model weights (large, auto-downloaded on first run)
+*.onnx
+*.pt
