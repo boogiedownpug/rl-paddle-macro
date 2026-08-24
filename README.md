@@ -122,9 +122,9 @@ controller's supported remapping software.
   passthrough diagnostics enabled.
 - `macro_core.py` — dependency-free, elapsed-time macro state machine.
 - `config.example.json` — documented runtime defaults; copy to `config.json`.
-- `detect_test.py` — earlier standalone detection-only test (draws boxes on
-  a live preview window), kept for reference/re-testing detection in
-  isolation if needed.
+- `detect_test.py` — local-inference detection preview. It uses the same model
+  and `monitor_index` setting as the controller and draws live boxes without
+  sending frames to Roboflow's cloud endpoint.
 - `api_key.txt` — your own Roboflow key, **not committed to git**
 
 ## Next steps
