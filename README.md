@@ -61,6 +61,10 @@ correction.
   it again, press F8, or take over after completion to return to passthrough.
   Set `trigger_mode` to `hold` if release-to-cancel is preferred.
 - The speed-flip and aerial timings still need a Free Play tuning pass.
+- F7 toggles a basic screen-space ball-chase mode for consensual private
+  matches. It requires ball cam and is intentionally conservative: loss of a
+  fresh ball detection immediately returns control to the player. This is not
+  a full 3D agent and is not intended for public or ranked matchmaking.
 - We explored using **HidHide** (a driver to hide the real controller from
   everything except our whitelisted script) to solve an earlier double-input/
   splitscreen issue. It's installed and correctly configured (verified via
@@ -112,7 +116,7 @@ the script needs matching updates.
    script is running
 
 Xbox Elite paddles are not exposed as distinct buttons by XInput. Configure a
-paddle to emit F9/F10 (or another key chosen in `config.json`) using the
+paddle to emit F7/F9/F10 (or another key chosen in `config.json`) using the
 controller's supported remapping software.
 
 ## Files

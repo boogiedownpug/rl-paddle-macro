@@ -36,6 +36,7 @@ class MacroEngine:
     started_at: float = 0.0
     previous_kickoff: bool = False
     previous_aerial: bool = False
+    previous_bot: bool = False
     _kickoff_ends: list[float] = field(init=False)
 
     def __post_init__(self):
@@ -50,11 +51,17 @@ class MacroEngine:
     def cancel(self):
         self.mode = "idle"
 
-    def update(self, now, kickoff_pressed, aerial_pressed):
+    def update(self, now, kickoff_pressed, aerial_pressed, bot_pressed=False):
         kickoff_edge = kickoff_pressed and not self.previous_kickoff
         aerial_edge = aerial_pressed and not self.previous_aerial
+        bot_edge = bot_pressed and not self.previous_bot
 
-        if kickoff_edge:
+        if bot_edge:
+            if self.mode == "bot":
+                self.cancel()
+            else:
+                self.mode, self.started_at = "bot", now
+        elif kickoff_edge:
             if self.trigger_mode == "toggle" and self.mode == "kickoff":
                 self.cancel()
             else:
@@ -73,6 +80,7 @@ class MacroEngine:
 
         self.previous_kickoff = kickoff_pressed
         self.previous_aerial = aerial_pressed
+        self.previous_bot = bot_pressed
         elapsed = max(0.0, now - self.started_at)
 
         if self.mode == "kickoff":
@@ -80,7 +88,7 @@ class MacroEngine:
                 if elapsed < end:
                     return output
             self.cancel()
-        elif self.mode == "aerial":
+        elif self.mode in {"aerial", "bot"}:
             output = self.aerial_controls(elapsed)
             if output is not None:
                 return output

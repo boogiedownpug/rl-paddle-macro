@@ -22,6 +22,8 @@ DEFAULTS = {
     "ball_min_confidence": 0.35, "aerial_yaw_gain": 3.0,
     "aerial_steering_smoothing": 0.35, "kickoff_key": "f9",
     "aerial_key": "f10", "cancel_key": "f8", "trigger_mode": "toggle",
+    "bot_key": "f7", "bot_steer_gain": 2.4, "bot_steering_smoothing": 0.25,
+    "bot_boost_error_threshold": 0.12,
     "controller_index": "auto", "poll_hz": 250, "debug": False,
 }
 
@@ -41,6 +43,7 @@ CONFIG = load_config()
 ball_lock = threading.Lock()
 ball_state = {"x_frac": 0.5, "confidence": 0.0, "timestamp": 0.0}
 smoothed_yaw = 0.0
+smoothed_bot_steer = 0.0
 
 
 def load_model():
@@ -98,6 +101,21 @@ def aerial_controls(elapsed):
     if elapsed < 0.520:
         return dict(NEUTRAL, pitch=1, boost=True, yaw=smoothed_yaw)
     return None
+
+
+def bot_controls(_elapsed):
+    """Basic ball-cam screen-space chase for consensual private matches."""
+    global smoothed_bot_steer
+    with ball_lock:
+        state = dict(ball_state)
+    if time.monotonic() - state["timestamp"] > float(CONFIG["ball_stale_seconds"]):
+        return None
+    error = state["x_frac"] - 0.5
+    target = max(-1.0, min(1.0, error * float(CONFIG["bot_steer_gain"])))
+    smoothing = float(CONFIG["bot_steering_smoothing"])
+    smoothed_bot_steer += (target - smoothed_bot_steer) * smoothing
+    return dict(NEUTRAL, throttle=1, steer=smoothed_bot_steer,
+                boost=abs(error) < float(CONFIG["bot_boost_error_threshold"]))
 
 
 def choose_controller_index():
@@ -176,11 +194,16 @@ def run_application():
     gamepad = vg.VX360Gamepad()
     controller_index = choose_controller_index()
     threading.Thread(target=detection_loop, args=(model,), daemon=True).start()
-    engine = MacroEngine(aerial_controls, trigger_mode=CONFIG["trigger_mode"])
+    def vision_action(elapsed):
+        return bot_controls(elapsed) if engine.mode == "bot" else aerial_controls(elapsed)
+
+    engine = MacroEngine(lambda elapsed: vision_action(elapsed),
+                         trigger_mode=CONFIG["trigger_mode"])
     interval = 1.0 / float(CONFIG["poll_hz"])
     old_mode, last_debug = engine.mode, 0.0
-    print(f"Running: kickoff={CONFIG['kickoff_key']}, aerial={CONFIG['aerial_key']}, "
-          f"cancel={CONFIG['cancel_key']}, mode={CONFIG['trigger_mode']}")
+    print(f"Running: bot={CONFIG['bot_key']}, kickoff={CONFIG['kickoff_key']}, "
+          f"aerial={CONFIG['aerial_key']}, cancel={CONFIG['cancel_key']}, "
+          f"mode={CONFIG['trigger_mode']}")
     print("Ctrl+C stops. A second trigger tap or the cancel key returns control.")
     try:
         while True:
@@ -189,7 +212,8 @@ def run_application():
                 engine.cancel()
             output = engine.update(time.monotonic(),
                                    keyboard.is_pressed(CONFIG["kickoff_key"]),
-                                   keyboard.is_pressed(CONFIG["aerial_key"]))
+                                   keyboard.is_pressed(CONFIG["aerial_key"]),
+                                   keyboard.is_pressed(CONFIG["bot_key"]))
             if output is None:
                 try:
                     state = XInput.get_state(controller_index)

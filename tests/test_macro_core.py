@@ -40,6 +40,19 @@ class MacroEngineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.engine("invalid")
 
+    def test_bot_toggles_on_and_off(self):
+        engine = self.engine(aerial=lambda elapsed: {"throttle": 1})
+        self.assertEqual(engine.update(1.0, False, False, True), {"throttle": 1})
+        self.assertEqual(engine.mode, "bot")
+        engine.update(1.1, False, False, False)
+        self.assertIsNone(engine.update(1.2, False, False, True))
+        self.assertEqual(engine.mode, "idle")
+
+    def test_bot_stale_vision_returns_to_manual(self):
+        engine = self.engine(aerial=lambda elapsed: None)
+        self.assertIsNone(engine.update(1.0, False, False, True))
+        self.assertEqual(engine.mode, "idle")
+
 
 if __name__ == "__main__":
     unittest.main()

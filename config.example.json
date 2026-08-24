@@ -3,12 +3,16 @@
   "kickoff_key": "f9",
   "aerial_key": "f10",
   "cancel_key": "f8",
+  "bot_key": "f7",
   "trigger_mode": "toggle",
   "controller_index": "auto",
   "ball_min_confidence": 0.35,
   "ball_stale_seconds": 1.0,
   "aerial_yaw_gain": 3.0,
   "aerial_steering_smoothing": 0.35,
+  "bot_steer_gain": 2.4,
+  "bot_steering_smoothing": 0.25,
+  "bot_boost_error_threshold": 0.12,
   "poll_hz": 250,
   "debug": false
 }
